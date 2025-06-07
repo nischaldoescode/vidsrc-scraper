@@ -12,7 +12,9 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "p-limit": "^6.2.0",
     "playwright": "^1.52.0",
     "puppeteer": "^24.10.0"
-  }
+  },
+  "type": "module"
 }
