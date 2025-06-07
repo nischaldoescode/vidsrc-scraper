@@ -1,7 +1,5 @@
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
-const fs = require("fs");
 const { chromium } = require("playwright");
 
 const app = express();
@@ -10,21 +8,12 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Create screenshots folder if doesn't exist
-const screenshotsDir = path.join(__dirname, "screenshots");
-if (!fs.existsSync(screenshotsDir)) {
-  fs.mkdirSync(screenshotsDir);
-}
-
-// List of vidsrc domains to try
 const PROVIDERS = [
   "https://vidsrc.xyz",
   "https://vidsrc.in",
   "https://vidsrc.pm",
   "https://vidsrc.net",
 ];
-
-// Removed withTimeout helper function entirely
 
 async function scrapeProvider(domain, url) {
   console.log(`\n[${domain}] Starting scrape for URL: ${url}`);
@@ -37,12 +26,11 @@ async function scrapeProvider(domain, url) {
   const page = await context.newPage();
 
   let hlsUrl = null;
-  let subtitles = [];
+  const subtitles = [];
 
   try {
     await page.route("**/*", (route) => {
-      const request = route.request();
-      const reqUrl = request.url();
+      const reqUrl = route.request().url();
 
       if (!hlsUrl && reqUrl.includes(".m3u8")) {
         hlsUrl = reqUrl;
@@ -52,73 +40,50 @@ async function scrapeProvider(domain, url) {
         subtitles.push(reqUrl);
         console.log(`[${domain}] Found subtitle URL: ${reqUrl}`);
       }
+
       route.continue();
     });
 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
     console.log(`[${domain}] Page loaded`);
 
-    // Wait for #the_frame div
     const frameDiv = await page.waitForSelector("#the_frame", {
-      timeout: 8000,
+      timeout: 10000,
     });
 
-    if (!frameDiv) {
-      throw new Error(`#the_frame div not found on ${domain}`);
-    }
+    if (frameDiv) {
+      const box = await frameDiv.boundingBox();
 
-    const box = await frameDiv.boundingBox();
+      if (box) {
+        const clickX = box.x + box.width / 2;
+        const clickY = box.y + box.height / 2;
+        console.log(
+          `[${domain}] Clicking at (${clickX.toFixed(1)}, ${clickY.toFixed(1)})`
+        );
 
-    if (box) {
-      const clickX = box.x + box.width / 2;
-      const clickY = box.y + box.height / 2;
-      console.log(
-        `[${domain}] Clicking #the_frame at (${clickX.toFixed(
-          1
-        )}, ${clickY.toFixed(1)})`
-      );
+        await page.mouse.move(clickX, clickY);
+        await page.mouse.click(clickX, clickY);
+      } else {
+        console.warn(`[${domain}] Fallback: clicking via JS`);
+        await page.evaluate(() => {
+          document.querySelector("#the_frame")?.click();
+        });
+      }
 
-      await page.mouse.move(clickX, clickY);
-      await page.mouse.click(clickX, clickY);
-      await page.waitForTimeout(5000); // wait 5 sec for streams to load
+      await page.waitForTimeout(10000);
     } else {
-      console.warn(`[${domain}] Could not get bounding box for #the_frame`);
-      // fallback to JS click
-      await page.evaluate(() => {
-        document.querySelector("#the_frame")?.click();
-      });
-      await page.waitForTimeout(5000);
+      throw new Error(`#the_frame div not found`);
     }
-
-    // Take screenshot
-    const screenshotName = `${domain
-      .replace(/^https?:\/\//, "")
-      .replace(/\./g, "_")}_${Date.now()}.png`;
-    const screenshotPath = path.join(screenshotsDir, screenshotName);
-    await page.screenshot({ path: screenshotPath });
-    console.log(`[${domain}] Screenshot saved to ${screenshotPath}`);
 
     await browser.close();
 
-    if (!hlsUrl) {
-      throw new Error("HLS URL not found");
-    }
+    if (!hlsUrl) throw new Error("HLS URL not found");
 
-    return {
-      hls_url: hlsUrl,
-      subtitles,
-      screenshot: screenshotName,
-      error: null,
-    };
+    return { hls_url: hlsUrl, subtitles, error: null };
   } catch (error) {
     await browser.close();
     console.error(`[${domain}] Error: ${error.message}`);
-    return {
-      hls_url: null,
-      subtitles: [],
-      screenshot: null,
-      error: error.message,
-    };
+    return { hls_url: null, subtitles: [], error: error.message };
   }
 }
 
@@ -144,41 +109,32 @@ app.get("/extract", async (req, res) => {
     });
   }
 
-  // Build URLs per domain
   const urls = PROVIDERS.reduce((acc, domain) => {
-    if (type === "tv") {
-      acc[
-        domain
-      ] = `${domain}/embed/tv?tmdb=${tmdb_id}&season=${season}&episode=${episode}`;
-    } else {
-      acc[domain] = `${domain}/embed/movie/${tmdb_id}`;
-    }
+    acc[domain] =
+      type === "tv"
+        ? `${domain}/embed/tv?tmdb=${tmdb_id}&season=${season}&episode=${episode}`
+        : `${domain}/embed/movie/${tmdb_id}`;
     return acc;
   }, {});
 
-  // Run all scrapes without timeout wrapper
-  const promises = Object.entries(urls).map(async ([domain, url]) => {
-    try {
-      return [domain, await scrapeProvider(domain, url)];
-    } catch (err) {
-      console.error(`[${domain}] Error: ${err.message}`);
-      return [
-        domain,
-        { hls_url: null, subtitles: [], screenshot: null, error: err.message },
-      ];
-    }
-  });
+  const resultsArr = await Promise.all(
+    Object.entries(urls).map(async ([domain, url]) => {
+      try {
+        const result = await scrapeProvider(domain, url);
+        return [domain, result];
+      } catch (err) {
+        console.error(`[${domain}] Final error: ${err.message}`);
+        return [domain, { hls_url: null, subtitles: [], error: err.message }];
+      }
+    })
+  );
 
-  const resultsArr = await Promise.all(promises);
   const results = Object.fromEntries(resultsArr);
-
-  // Determine if any success
   const success = Object.values(results).some((r) => r.hls_url);
 
   res.json({ success, results });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Server listening on http://localhost:${PORT}`);
-  console.log(`Screenshots saved in /screenshots folder`);
+  console.log(`🚀 Server running at http://localhost:${PORT}`);
 });
