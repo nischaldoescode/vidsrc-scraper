@@ -1,5 +1,5 @@
-# Use official Node.js image with Chromium deps
-FROM mcr.microsoft.com/playwright:focal
+# Use the latest Playwright image that includes all browsers
+FROM mcr.microsoft.com/playwright:v1.52.0-focal
 
 # Set working directory
 WORKDIR /app
