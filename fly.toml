@@ -1,4 +1,4 @@
-# fly.toml app configuration file generated for vidsrc-scraper on 2025-06-07T15:29:27Z
+# fly.toml app configuration file generated for vidsrc-scraper on 2025-06-07T18:32:30Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
@@ -19,5 +19,5 @@ primary_region = 'jnb'
 [[vm]]
   memory = '1gb'
   cpu_kind = 'shared'
-  cpus = 1
-  memory_mb = 1024
+  cpus = 8
+  memory_mb = 2048
