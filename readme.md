@@ -66,42 +66,51 @@ episode integer Required if type=tv TV show episode number
 ## Examples
 
 Movie
+
+```bash
 GET /extract?tmdb_id=550&type=movie
+```
 
 TV Show
+
+```bash
 GET /extract?tmdb_id=1399&type=tv&season=1&episode=1
+```
 
 Response Format:
+
+```bash
 {
 "success": true,
 "results": {
-"https://vidsrc.xyz": {
-"hls_url": "https://example.m3u8",
-"subtitles": [
-"https://example.vtt"
-],
-"error": null
-},
-"https://vidsrc.in": {
-"hls_url": "https://example.m3u8",
-"subtitles": [
-"https://example.vtt"
-],
-"error": null
-},
-"https://vidsrc.pm": {
-"hls_url": "https://example.m3u8",
-"subtitles": [
-"https://example.vtt"
-],
-"error": null
-},
-"https://vidsrc.net": {
-"hls_url": "https://example.m3u8",
-"subtitles": [
-"https://example.vtt"
-],
-"error": null
+    "https://vidsrc.xyz": {
+        "hls_url": "https://example.m3u8",
+        "subtitles": [
+        "https://example.vtt"
+        ],
+        "error": null
+    },
+    "https://vidsrc.in": {
+        "hls_url": "https://example.m3u8",
+        "subtitles": [
+        "https://example.vtt"
+        ],
+        "error": null
+    },
+    "https://vidsrc.pm": {
+        "hls_url": "https://example.m3u8",
+        "subtitles": [
+        "https://example.vtt"
+        ],
+        "error": null
+    },
+    "https://vidsrc.net": {
+        "hls_url": "https://example.m3u8",
+        "subtitles": [
+        "https://example.vtt"
+        ],
+        "error": null
+    }
 }
 }
-}
+```
