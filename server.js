@@ -389,9 +389,7 @@ app.get("/", (req, res) => {
 // Launch browser once before server starts listening
 (async () => {
   browser = await chromium.launch({
-    headless: false,
-    slowMo: 100,
-    devtools: true,
+    headless: true,
   });
   app.listen(PORT, () => {
     console.log(`🚀 Server running at http://localhost:${PORT}`);
