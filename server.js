@@ -342,6 +342,21 @@ async function getSubtitlesWithDownloadLinks(imdb_id) {
   return results.filter(Boolean);
 }
 
+//convert Subtitle to compatible format
+function convertSRTtoVTT(srtText) {
+  return (
+    "WEBVTT\n\n" +
+    srtText
+      .replace(/\r+/g, "")
+      .replace(/^\s+|\s+$/g, "")
+      .split("\n")
+      .map((line) =>
+        line.replace(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/, "$1:$2:$3.$4")
+      )
+      .join("\n")
+  );
+}
+
 // 🟢 Subtitles endpoint
 app.get("/subtitles", async (req, res) => {
   const { tmdb_id, type = "movie", season, episode } = req.query;
@@ -377,6 +392,24 @@ app.get("/subtitles", async (req, res) => {
   } catch (err) {
     console.error("[/subtitles] Error:", err.message);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+//Subtitle proxy
+app.get("/subtitle-proxy", async (req, res) => {
+  const fileUrl = req.query.url;
+  if (!fileUrl) return res.status(400).send("Missing subtitle URL");
+
+  try {
+    const subtitleRes = await fetch(fileUrl);
+    const srt = await subtitleRes.text();
+    const vtt = convertSRTtoVTT(srt);
+
+    res.setHeader("Content-Type", "text/vtt");
+    res.send(vtt);
+  } catch (err) {
+    console.error("Proxy subtitle error:", err.message);
+    res.status(500).send("Failed to convert subtitle");
   }
 });
 
