@@ -2,24 +2,21 @@ import express, { json } from "express";
 import cors from "cors";
 import { chromium } from "playwright";
 import pLimit from "p-limit";
-import { pipeline } from "stream";
-import { promisify } from "util";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import { getTVSubtitleVTT } from "./utils/tvSubtitles.js";
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const OPENSUB_API_KEY = process.env.OPENSUB_API_KEY;
-const TMDB_API_KEY = process.env.TMDB_API_KEY;
-const TMDB_BEARER_TOKEN = process.env.TMDB_BEARER_TOKEN;
+const PORT = process.env.PORT || 4000;
+export const OPENSUB_API_KEY = process.env.OPENSUB_API_KEY;
+export const TMDB_API_KEY = process.env.TMDB_API_KEY;
+export const TMDB_BEARER_TOKEN = process.env.TMDB_BEARER_TOKEN;
 
-const headers = {
+export const headers = {
   Authorization: `Bearer ${TMDB_BEARER_TOKEN}`,
   "Content-Type": "application/json;charset=utf-8",
 };
-
-const streamPipeline = promisify(pipeline);
 
 app.use(cors());
 app.use(json());
@@ -31,20 +28,11 @@ const PROVIDERS = [
   "https://vidsrc.net",
 ];
 
-const LANGUAGE_NAMES = {
+export const LANGUAGE_NAMES = {
   en: "English",
-  es: "Spanish",
-  fr: "French",
-  pt: "Portuguese",
-  ar: "Arabic",
-  de: "German",
-  it: "Italian",
-  tr: "Turkish",
-  hi: "Hindi",
-  ru: "Russian",
 };
 
-const COMMON_LANGUAGES = Object.keys(LANGUAGE_NAMES);
+export const COMMON_LANGUAGES = Object.keys(LANGUAGE_NAMES);
 
 // Global browser instance, launched once
 let browser;
@@ -172,7 +160,7 @@ async function scrapeProvider(domain, url) {
   }
 }
 
-//Extract endpoint
+//Extract endpoint for m3u8 scraper
 app.get("/extract", async (req, res) => {
   const type = req.query.type || "movie";
   const tmdb_id = req.query.tmdb_id;
@@ -248,63 +236,73 @@ app.get("/extract", async (req, res) => {
   }
 });
 
-// 🎯 TMDB -> IMDb
+/**
+ * 🎯 TMDB -> IMDb (for movies only)
+ */
 async function getIMDbIdFromTMDB(tmdb_id, type = "movie") {
   const url = `https://api.themoviedb.org/3/${type}/${tmdb_id}/external_ids?api_key=${TMDB_API_KEY}`;
   const response = await fetch(url, { headers });
-  if (!response.ok) {
-    const text = await response.text();
-    console.error("[TMDB] Error:", text);
-    throw new Error("Failed to fetch IMDb ID from TMDB");
-  }
+  if (!response.ok) throw new Error("Failed to fetch IMDb ID from TMDB");
   const json = await response.json();
   return json.imdb_id || null;
 }
 
-// 🧠 Step 1: Search subtitles from OpenSubtitles
+/**
+ * 🧠 Unified Subtitle Search (for movies only)
+ */
 async function searchSubtitles(imdb_id) {
+  // Movie: Only fetch page 1 from OpenSubtitles
   const res = await fetch(
-    `https://api.opensubtitles.com/api/v1/subtitles?imdb_id=${imdb_id}`,
+    `https://api.opensubtitles.com/api/v1/subtitles?imdb_id=${imdb_id}&per_page=100&page=1`,
     {
-      headers: { "Api-Key": OPENSUB_API_KEY, "User-Agent": "Cinemi v1.0.0" },
+      headers: {
+        "Api-Key": OPENSUB_API_KEY,
+        "User-Agent": "Cinemi v1.0.0",
+      },
     }
   );
 
   if (!res.ok) {
-    const error = await res.text();
-    console.error("[OpenSubtitles] Search failed:", error);
-    throw new Error("Subtitle search failed");
+    console.error("[OpenSubtitles] Request failed");
+    return [];
   }
 
   const json = await res.json();
+  const seen = new Set();
+  if (json.data.length === 0) {
+    return [];
+  }
 
-  const subtitles = json.data
-    ?.filter(
+  return (json.data || [])
+    .filter(
       (item) =>
         item.attributes?.files?.[0]?.file_id &&
         COMMON_LANGUAGES.includes(item.attributes.language)
     )
     .map((item) => {
       const file = item.attributes.files[0];
-      const langCode = item.attributes.language;
+      const lang = item.attributes.language;
       return {
-        language: langCode,
-        language_name: LANGUAGE_NAMES[langCode] || langCode,
+        language: lang,
+        language_name: LANGUAGE_NAMES[lang] || lang,
         file_id: file.file_id,
+        download_count: item.attributes.download_count || 0,
       };
-    });
-
-  return subtitles || [];
+    })
+    .sort((a, b) => b.download_count - a.download_count)
+    .slice(0, 2);
 }
 
-// 🧠 Step 2: Get usable download URL from OpenSubtitles API
+/**
+ * 🧠 Get Download URL from OpenSubtitles (for Movies only)
+ */
 async function getSubtitleDownloadUrl(file_id) {
   const res = await fetch("https://api.opensubtitles.com/api/v1/download", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "Api-Key": OPENSUB_API_KEY,
-      "User-Agent": "Cinemi v1.0.0", // ✅ Required
+      "User-Agent": "Cinemi v1.0.0",
     },
     body: JSON.stringify({ file_id }),
   });
@@ -319,47 +317,11 @@ async function getSubtitleDownloadUrl(file_id) {
   return json.link;
 }
 
-// 🧠 Step 3: Orchestrate full subtitle fetch flow
-async function getSubtitlesWithDownloadLinks(imdb_id) {
-  const baseList = await searchSubtitles(imdb_id);
-
-  const results = await Promise.all(
-    baseList.map(async (sub) => {
-      try {
-        const downloadUrl = await getSubtitleDownloadUrl(sub.file_id);
-        return {
-          language: sub.language,
-          language_name: sub.language_name,
-          url: downloadUrl,
-        };
-      } catch (err) {
-        console.warn(`[Subtitle] Failed for ${sub.language}: ${err.message}`);
-        return null;
-      }
-    })
-  );
-
-  return results.filter(Boolean);
-}
-
-//convert Subtitle to compatible format
-function convertSRTtoVTT(srtText) {
-  return (
-    "WEBVTT\n\n" +
-    srtText
-      .replace(/\r+/g, "")
-      .replace(/^\s+|\s+$/g, "")
-      .split("\n")
-      .map((line) =>
-        line.replace(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/, "$1:$2:$3.$4")
-      )
-      .join("\n")
-  );
-}
-
-// 🟢 Subtitles endpoint
-app.get("/subtitles", async (req, res) => {
-  const { tmdb_id, type = "movie", season, episode } = req.query;
+/**
+ * 🔥 Subtitles Endpoint (for movies only)
+ */
+app.get("/movie-subtitles", async (req, res) => {
+  const { tmdb_id, type = "movie" } = req.query;
 
   if (!tmdb_id) {
     return res
@@ -369,24 +331,37 @@ app.get("/subtitles", async (req, res) => {
 
   try {
     const imdb_id = await getIMDbIdFromTMDB(tmdb_id, type);
-
     if (!imdb_id) {
       return res
         .status(404)
         .json({ success: false, error: "IMDb ID not found" });
     }
 
-    const subtitles = await getSubtitlesWithDownloadLinks(imdb_id);
+    const baseList = await searchSubtitles(imdb_id);
 
-    return res.json({
+    const subtitles = await Promise.all(
+      baseList.map(async (sub) => {
+        if (sub.url) return sub;
+        try {
+          const url = await getSubtitleDownloadUrl(sub.file_id);
+          return {
+            language: sub.language,
+            language_name: sub.language_name,
+            url,
+          };
+        } catch {
+          return null;
+        }
+      })
+    );
+
+    res.json({
       success: true,
-      subtitles,
+      subtitles: subtitles.filter(Boolean),
       meta: {
         tmdb_id,
         imdb_id,
         type,
-        season: season || null,
-        episode: episode || null,
       },
     });
   } catch (err) {
@@ -395,7 +370,29 @@ app.get("/subtitles", async (req, res) => {
   }
 });
 
-//Subtitle proxy
+/**
+ * Subtitles Endpoint (for TV Shows only)
+ */
+app.get("/tv-subtitles", async (req, res) => {
+  const { title, season, episode, type } = req.query;
+
+  try {
+    if (type === "tv") {
+      const vtt = await getTVSubtitleVTT(title, season, episode);
+      if (!vtt) return res.status(404).send("No subtitle found");
+      return res.set("Content-Type", "text/vtt").send(vtt);
+    }
+
+    res.status(400).send("Invalid type provided");
+  } catch (err) {
+    console.error("❌ Subtitle API Error:", err.message);
+    res.status(500).send("Internal server error");
+  }
+});
+
+/**
+ * 📦 Subtitle Proxy to Convert .srt → .vtt (for movies only)
+ */
 app.get("/subtitle-proxy", async (req, res) => {
   const fileUrl = req.query.url;
   if (!fileUrl) return res.status(400).send("Missing subtitle URL");
@@ -403,12 +400,22 @@ app.get("/subtitle-proxy", async (req, res) => {
   try {
     const subtitleRes = await fetch(fileUrl);
     const srt = await subtitleRes.text();
-    const vtt = convertSRTtoVTT(srt);
+
+    const vtt =
+      "WEBVTT\n\n" +
+      srt
+        .replace(/\r+/g, "")
+        .replace(/^\s+|\s+$/g, "")
+        .split("\n")
+        .map((line) =>
+          line.replace(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/, "$1:$2:$3.$4")
+        )
+        .join("\n");
 
     res.setHeader("Content-Type", "text/vtt");
     res.send(vtt);
   } catch (err) {
-    console.error("Proxy subtitle error:", err.message);
+    console.error("Subtitle Proxy Error:", err.message);
     res.status(500).send("Failed to convert subtitle");
   }
 });
