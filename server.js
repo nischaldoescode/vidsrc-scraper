@@ -408,7 +408,7 @@ app.get("/subtitle-proxy", async (req, res) => {
         .replace(/^\s+|\s+$/g, "")
         .split("\n")
         .map((line) =>
-          line.replace(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/, "$1:$2:$3.$4")
+          line.replace(/(\d{2}):(\d{2}):(\d{2})[,.](\d{3})/g, "$1:$2:$3.$4")
         )
         .join("\n");
 
