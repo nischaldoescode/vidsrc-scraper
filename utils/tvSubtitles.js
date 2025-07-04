@@ -31,6 +31,10 @@ function buildZipUrlFromTitle(title) {
   }
 
   const [showTitle, showName, episodeCode, releaseInfo] = match;
+  console.log("Show Title", showTitle);
+  console.log("Show Name", showName);
+  console.log("Episode Code", episodeCode);
+  console.log("Release info", releaseInfo);
 
   const fileName = `${showName}_${episodeCode}_${releaseInfo}.en.zip`;
 
@@ -231,9 +235,35 @@ function streamToString(stream) {
 
 // New helper to extract release part from filename
 function extractReleaseFromFilename(filename) {
-  const parts = filename.split(".");
-  const releaseParts = parts.slice(-4, -2); // e.g. ['WebRip', 'NTb', 'en']
-  return releaseParts.join(".");
+  const hyphenParts = filename.split(" - ");
+  const lastPart = hyphenParts[2] || "";
+
+  // Remove .en.srt or .srt
+  const noExt = lastPart.replace(/\.en\.srt$|\.srt$/, "").trim();
+
+  const parts = noExt.split(".");
+  const hasResolution = parts.some((p) => /\d{3,4}p/.test(p));
+
+  if (hasResolution) {
+    // e.g. 720p HDTV.LOL
+    const resIndex = parts.findIndex((p) => /\d{3,4}p/.test(p));
+    const releaseParts = parts.slice(resIndex);
+    const [res, rip, group] = releaseParts;
+
+    if (group) return `${res} ${rip}.${group}`;
+    if (rip) return `${res} ${rip}`;
+    return res;
+  } else {
+    // No resolution
+    const last = parts[parts.length - 1];
+    const secondLast = parts[parts.length - 2];
+
+    if (secondLast && secondLast !== last) {
+      return `${secondLast}.${last}`;
+    } else {
+      return last; // e.g. "WEB"
+    }
+  }
 }
 
 // Function to download and convert .srt file and return .vtt content using the zipUrl
@@ -267,27 +297,49 @@ async function downloadAndConvertToVTT(zipUrl) {
 
 export async function getTVSubtitleVTT(title, season, episode) {
   const showId = await searchTVShow(title);
+  if (!showId) return;
   await randomSleep();
   const episodeId = await getEpisodePageId(showId, season, episode);
+  if (!episodeId) return;
   await randomSleep();
-  const subtitleMeta = await getSubtitleIDAndEpisodeTitle(episodeId);
-  const { subtitleId, subtitleTitle } = subtitleMeta;
-  const actualFilename = await getActualFilenameFromSubtitlePage(subtitleId);
 
+  const subtitleMeta = await getSubtitleIDAndEpisodeTitle(episodeId);
+  if (!subtitleMeta) return;
+
+  const { subtitleId, subtitleTitle } = subtitleMeta;
+
+  const actualFilename = await getActualFilenameFromSubtitlePage(subtitleId);
   let finalTitle = subtitleTitle;
 
   if (actualFilename) {
-    const correctRelease = extractReleaseFromFilename(actualFilename); // e.g. "WebRip.NTb.en"
+    const correctRelease = extractReleaseFromFilename(actualFilename);
 
-    // Extract current release inside parentheses
     const match = subtitleTitle.match(/\(([^)]+)\)/);
     const currentRelease = match ? match[1] : null;
 
-    if (currentRelease && currentRelease !== correctRelease) {
-      finalTitle = subtitleTitle.replace(/\([^)]+\)/, `(${correctRelease})`);
+    if (currentRelease) {
+      if (currentRelease.includes(".") || currentRelease.includes(" ")) {
+        if (currentRelease !== correctRelease) {
+          console.log(
+            `🔁 Replacing incorrect release: (${currentRelease}) ➡ ${correctRelease}`
+          );
+          finalTitle = subtitleTitle.replace(
+            /\([^)]+\)/,
+            `(${correctRelease})`
+          );
+        } else {
+          finalTitle = subtitleTitle;
+        }
+      } else {
+        // Single word release (like "WEB") — replace regardless
+        finalTitle = subtitleTitle.replace(/\([^)]+\)/, `(${currentRelease})`);
+      }
     }
   }
+
   await randomSleep();
   const zipUrl = buildZipUrlFromTitle(finalTitle);
+  await randomSleep();
+  console.log("📦 Zip URL:", zipUrl);
   return await downloadAndConvertToVTT(zipUrl);
 }
