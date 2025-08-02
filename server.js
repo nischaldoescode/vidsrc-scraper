@@ -5,6 +5,7 @@ import pLimit from "p-limit";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
 import { getTVSubtitleVTT } from "./utils/tvSubtitles.js";
+import { Parser } from "m3u8-parser";
 dotenv.config();
 
 const app = express();
@@ -42,6 +43,32 @@ const cache = new Map();
 
 // Limit concurrent scraping to 2 providers at a time
 const limit = pLimit(2);
+
+async function getResolutionsFromM3U8(url) {
+  try {
+    const response = await fetch(url);
+    const body = await response.text();
+
+    const parser = new Parser();
+    parser.push(body);
+    parser.end();
+
+    const levels = parser.manifest.playlists || [];
+
+    const resolutions = levels
+      .map((p) => {
+        const res = p.attributes.RESOLUTION;
+        return res ? `${res.height}p` : null;
+      })
+      .filter(Boolean);
+
+    // Remove duplicates & sort descending
+    return [...new Set(resolutions)].sort((a, b) => parseInt(b) - parseInt(a));
+  } catch (err) {
+    console.error(`Error parsing m3u8 at ${url}`, err);
+    return [];
+  }
+}
 
 //Scraper util function
 async function scrapeProvider(domain, url) {
@@ -204,12 +231,20 @@ app.get("/extract", async (req, res) => {
         limit(async () => {
           try {
             const result = await scrapeProvider(domain, url);
-            return [domain, result];
+            const resolutions = result.hls_url
+              ? await getResolutionsFromM3U8(result.hls_url)
+              : [];
+            return [domain, { ...result, resolutions }];
           } catch (err) {
             console.error(`[${domain}] Final error: ${err.message}`);
             return [
               domain,
-              { hls_url: null, subtitles: [], error: err.message },
+              {
+                hls_url: null,
+                resolutions: [],
+                subtitles: [],
+                error: err.message,
+              },
             ];
           }
         })
@@ -228,6 +263,8 @@ app.get("/extract", async (req, res) => {
 
     res.json(response);
   } catch (err) {
+    console.error("❌ /extract endpoint error:", err.message);
+    console.error("❌ Full error stack:", err.stack);
     res.status(500).json({
       success: false,
       error: "Unexpected server error",
