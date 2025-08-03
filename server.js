@@ -6,8 +6,9 @@ import fetch from "node-fetch";
 import dotenv from "dotenv";
 import { getTVSubtitleVTT } from "./utils/tvSubtitles.js";
 import { Parser } from "m3u8-parser";
-dotenv.config();
+import zlib from "node:zlib";
 
+dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 export const OPENSUB_API_KEY = process.env.OPENSUB_API_KEY;
@@ -17,6 +18,8 @@ export const TMDB_BEARER_TOKEN = process.env.TMDB_BEARER_TOKEN;
 export const headers = {
   Authorization: `Bearer ${TMDB_BEARER_TOKEN}`,
   "Content-Type": "application/json;charset=utf-8",
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
 };
 
 app.use(cors());
@@ -44,28 +47,65 @@ const cache = new Map();
 // Limit concurrent scraping to 2 providers at a time
 const limit = pLimit(2);
 
-async function getResolutionsFromM3U8(url) {
+async function getResolutionsFromM3U8(url, page = null, capturedContent = null) {
   try {
-    const response = await fetch(url);
-    const body = await response.text();
+    let body;
+
+    if (capturedContent) {
+      // Use pre-captured content
+      body = capturedContent;
+      console.log('Using captured M3U8 content');
+    } else if (page) {
+      // Fallback to browser fetch (will likely fail)
+      try {
+        body = await page.evaluate(async (m3u8Url) => {
+          const res = await fetch(m3u8Url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          return await res.text();
+        }, url);
+      } catch (err) {
+        console.warn('Browser context fetch failed:', err.message);
+        return [];
+      }
+    } else {
+      // Direct fetch fallback
+      const response = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Referer': 'https://vidsrc.xyz/',
+          'Accept': 'application/vnd.apple.mpegurl,*/*',
+        },
+      });
+
+      if (!response.ok) {
+        console.error(`M3U8 fetch failed: ${response.status} ${response.statusText}`);
+        return [];
+      }
+
+      body = await response.text();
+    }
+
+    // Validate content
+    if (!body.includes('#EXTM3U')) {
+      console.error('Invalid M3U8 content received');
+      return [];
+    }
 
     const parser = new Parser();
     parser.push(body);
     parser.end();
 
     const levels = parser.manifest.playlists || [];
-
     const resolutions = levels
       .map((p) => {
-        const res = p.attributes.RESOLUTION;
+        const res = p.attributes?.RESOLUTION;
         return res ? `${res.height}p` : null;
       })
       .filter(Boolean);
 
-    // Remove duplicates & sort descending
     return [...new Set(resolutions)].sort((a, b) => parseInt(b) - parseInt(a));
   } catch (err) {
-    console.error(`Error parsing m3u8 at ${url}`, err);
+    console.error(`Error parsing m3u8 at ${url}:`, err.message);
     return [];
   }
 }
@@ -82,6 +122,7 @@ async function scrapeProvider(domain, url) {
   const page = await context.newPage();
 
   let hlsUrl = null;
+  let m3u8Content = null; 
   const subtitles = [];
 
   const isSubtitle = (url) => {
@@ -94,21 +135,31 @@ async function scrapeProvider(domain, url) {
 
   try {
     // Intercept requests
-    await page.route("**/*", (route) => {
-      const reqUrl = route.request().url();
+let m3u8Content = null;
 
-      if (!hlsUrl && reqUrl.includes(".m3u8")) {
-        hlsUrl = reqUrl;
-        console.log(`[${domain}] Found HLS URL: ${hlsUrl}`);
+await page.route("**/*", async (route) => {
+  const reqUrl = route.request().url();
+
+  if (!hlsUrl && reqUrl.includes(".m3u8")) {
+    hlsUrl = reqUrl;
+    console.log(`[${domain}] Found HLS URL: ${hlsUrl}`);
+    
+    // Intercept and capture the M3U8 response
+    try {
+      const response = await route.fetch();
+      if (response.ok()) {
+        m3u8Content = await response.text();
+        console.log(`[${domain}] Captured M3U8 content (${m3u8Content.length} chars)`);
       }
-
-      if (isSubtitle(reqUrl) && !subtitles.includes(reqUrl)) {
-        subtitles.push(reqUrl);
-        console.log(`[${domain}] (route) Found subtitle URL: ${reqUrl}`);
-      }
-
+      route.fulfill({ response });
+    } catch (err) {
+      console.warn(`[${domain}] Failed to capture M3U8 content:`, err.message);
       route.continue();
-    });
+    }
+  } else {
+    route.continue();
+  }
+});
 
     // Also listen for subtitle requests via page events
     page.on("request", (request) => {
@@ -172,13 +223,17 @@ async function scrapeProvider(domain, url) {
     } else {
       throw new Error(`#the_frame div not found`);
     }
+    // Get resolutions before closing page
+    const resolutions = hlsUrl 
+      ? await getResolutionsFromM3U8(hlsUrl, page, m3u8Content)
+      : [];
 
     await page.close();
     await context.close();
 
     if (!hlsUrl) throw new Error("HLS URL not found");
 
-    return { hls_url: hlsUrl, subtitles, error: null };
+    return { hls_url: hlsUrl, subtitles, resolutions, error: null };
   } catch (error) {
     await page.close().catch(() => {});
     await context.close().catch(() => {});
@@ -231,9 +286,10 @@ app.get("/extract", async (req, res) => {
         limit(async () => {
           try {
             const result = await scrapeProvider(domain, url);
-            const resolutions = result.hls_url
-              ? await getResolutionsFromM3U8(result.hls_url)
-              : [];
+            const resolutions =
+              result.hls_url && result.page
+                ? await getResolutionsFromM3U8(result.hls_url, result.page)
+                : result.resolutions || [];
             return [domain, { ...result, resolutions }];
           } catch (err) {
             console.error(`[${domain}] Final error: ${err.message}`);
@@ -263,8 +319,8 @@ app.get("/extract", async (req, res) => {
 
     res.json(response);
   } catch (err) {
-    console.error("❌ /extract endpoint error:", err.message);
-    console.error("❌ Full error stack:", err.stack);
+    console.error("/extract endpoint error:", err.message);
+    console.error("Full error stack:", err.stack);
     res.status(500).json({
       success: false,
       error: "Unexpected server error",
